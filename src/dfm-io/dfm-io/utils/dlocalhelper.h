@@ -60,6 +60,8 @@ public:
     static bool isNumOrChar(const QChar ch);
     static bool isNumber(const QChar ch);
     static bool isSymbol(const QChar ch);
+    static bool isFullWidthChar(const QChar ch, QChar &normalized);
+    static QString makeQString(const QString::const_iterator &it, uint unicode);
     static bool compareByStringEx(const QString &str1, const QString &str2);
     static QString numberStr(const QString &str, int pos);
     static bool compareByString(const QString &str1, const QString &str2);
@@ -68,7 +70,6 @@ public:
     static int compareByLastModifed(const FTSENT **left, const FTSENT **right);
     static int compareByLastRead(const FTSENT **left, const FTSENT **right);
     static QSharedPointer<DEnumerator::SortFileInfo> createSortFileInfo(const FTSENT *ent,
-                                                                        const QSharedPointer<DFileInfo> &info,
                                                                         const QSet<QString> hidList);
 private:
     static QVariant getGFileInfoIcon(GFileInfo *gfileinfo, const char *key, DFMIOErrorCode &errorcode);

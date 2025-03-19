@@ -30,6 +30,7 @@ USING_IO_NAMESPACE
 DEnumeratorPrivate::DEnumeratorPrivate(DEnumerator *q)
     : q(q)
 {
+    queryAttributes = FILE_DEFAULT_ATTRIBUTES;
 }
 
 DEnumeratorPrivate::~DEnumeratorPrivate()
@@ -89,7 +90,7 @@ bool DEnumeratorPrivate::createEnumerator(const QUrl &url, QPointer<DEnumeratorP
     g_autoptr(GError) gerror = nullptr;
     checkAndResetCancel();
     GFileEnumerator *genumerator = g_file_enumerate_children(gfile,
-                                                             FILE_DEFAULT_ATTRIBUTES,
+                                                             queryAttributes.toStdString().c_str(),
                                                              enumLinks ? G_FILE_QUERY_INFO_NONE : G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
                                                              cancellable,
                                                              &gerror);
@@ -123,7 +124,6 @@ void DEnumeratorPrivate::setErrorFromGError(GError *gerror)
 {
     if (!gerror)
         return;
-
     error.setCode(DFMIOErrorCode(gerror->code));
     if (error.code() == DFMIOErrorCode::DFM_IO_ERROR_FAILED)
         error.setMessage(gerror->message);
@@ -137,98 +137,155 @@ bool DEnumeratorPrivate::checkFilter()
     if (!dfileInfoNext)
         return false;
 
+    // 1. 首先处理特殊目录 "." 和 ".."
+    const QString &fileName = dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardName).toString();
+    if (!shouldShowDotAndDotDot(fileName))
+        return false;
+
+    // 2. 处理目录和文件的过滤
+    if (!checkEntryTypeFilter())
+        return false;
+
+    // 3. 处理权限过滤
+    if (!checkPermissionFilter())
+        return false;
+
+    // 4. 处理符号链接过滤
+    if (!checkSymlinkFilter())
+        return false;
+
+    // 5. 处理隐藏文件过滤
+    if (!checkHiddenFilter())
+        return false;
+
+    // 6. 处理文件名过滤器
+    if (!checkNameFilter(fileName))
+        return false;
+
+    return true;
+}
+
+bool DEnumeratorPrivate::shouldShowDotAndDotDot(const QString &fileName)
+{
+    const bool isDot = (fileName == ".");
+    const bool isDotDot = (fileName == "..");
+
+    if (isDot && (dirFilters.testFlag(DEnumerator::DirFilter::kNoDot) || dirFilters.testFlag(DEnumerator::DirFilter::kNoDotAndDotDot)))
+        return false;
+
+    if (isDotDot && (dirFilters.testFlag(DEnumerator::DirFilter::kNoDotDot) || dirFilters.testFlag(DEnumerator::DirFilter::kNoDotAndDotDot)))
+        return false;
+
+    return true;
+}
+
+bool DEnumeratorPrivate::checkEntryTypeFilter()
+{
     const bool isDir = dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsDir).toBool();
-    if ((dirFilters & DEnumerator::DirFilter::kAllDirs).testFlag(DEnumerator::DirFilter::kAllDirs)) {   // all dir, no apply filters rules
+    const bool isSymlink = dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsSymlink).toBool();
+    
+    // kAllDirs: 显示所有目录，包括符号链接指向的目录
+    if (dirFilters.testFlag(DEnumerator::DirFilter::kAllDirs)) {
         if (isDir)
             return true;
+            
+        if (isSymlink) {
+            // 对于符号链接，需要检查其目标
+            const QString targetPath = dfileInfoNext->attribute(
+                DFileInfo::AttributeID::kStandardSymlinkTarget).toString();
+            if (!targetPath.isEmpty()) {
+                // 如果是相对路径，需要转换为绝对路径
+                QString absoluteTargetPath = targetPath;
+                if (QDir::isRelativePath(targetPath)) {
+                    const QString parentPath = dfileInfoNext->attribute(
+                        DFileInfo::AttributeID::kStandardParentPath).toString();
+                    absoluteTargetPath = QDir(parentPath).absoluteFilePath(targetPath);
+                }
+                
+                QUrl targetUrl = QUrl::fromLocalFile(absoluteTargetPath);
+                QSharedPointer<DFileInfo> targetInfo = DLocalHelper::createFileInfoByUri(targetUrl);
+                if (targetInfo) {
+                    return targetInfo->attribute(DFileInfo::AttributeID::kStandardIsDir).toBool();
+                }
+            }
+        }
+        return false;
     }
+    
+    // 如果没有指定 kAllDirs，则根据 kDirs 和 kFiles 过滤
+    const bool wantDirs = dirFilters.testFlag(DEnumerator::DirFilter::kDirs);
+    const bool wantFiles = dirFilters.testFlag(DEnumerator::DirFilter::kFiles);
+    const bool isFile = dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsFile).toBool();
+    
+    // 如果既不要目录也不要文件，返回 false
+    if (!wantDirs && !wantFiles)
+        return false;
+        
+    // 如果只要目录
+    if (wantDirs && !wantFiles)
+        return isDir;
+        
+    // 如果只要文件
+    if (!wantDirs && wantFiles)
+        return isFile;
+        
+    // 如果都要
+    return true;
+}
 
-    // dir filter
-    bool ret = true;
+bool DEnumeratorPrivate::checkPermissionFilter()
+{
+    if (!dirFilters.testFlag(DEnumerator::DirFilter::kReadable) && !dirFilters.testFlag(DEnumerator::DirFilter::kWritable) && !dirFilters.testFlag(DEnumerator::DirFilter::kExecutable))
+        return true;
 
     const bool readable = dfileInfoNext->attribute(DFileInfo::AttributeID::kAccessCanRead).toBool();
     const bool writable = dfileInfoNext->attribute(DFileInfo::AttributeID::kAccessCanWrite).toBool();
     const bool executable = dfileInfoNext->attribute(DFileInfo::AttributeID::kAccessCanExecute).toBool();
 
-    auto checkRWE = [&]() -> bool {
-        if ((dirFilters & DEnumerator::DirFilter::kReadable).testFlag(DEnumerator::DirFilter::kReadable)) {
-            if (!readable)
-                return false;
-        }
-        if ((dirFilters & DEnumerator::DirFilter::kWritable).testFlag(DEnumerator::DirFilter::kWritable)) {
-            if (!writable)
-                return false;
-        }
-        if ((dirFilters & DEnumerator::DirFilter::kExecutable).testFlag(DEnumerator::DirFilter::kExecutable)) {
-            if (!executable)
-                return false;
-        }
+    if (dirFilters.testFlag(DEnumerator::DirFilter::kReadable) && !readable)
+        return false;
+    if (dirFilters.testFlag(DEnumerator::DirFilter::kWritable) && !writable)
+        return false;
+    if (dirFilters.testFlag(DEnumerator::DirFilter::kExecutable) && !executable)
+        return false;
+
+    return true;
+}
+
+bool DEnumeratorPrivate::checkSymlinkFilter()
+{
+    if (!dirFilters.testFlag(DEnumerator::DirFilter::kNoSymLinks))
         return true;
-    };
 
-    if ((dirFilters & DEnumerator::DirFilter::kAllEntries).testFlag(DEnumerator::DirFilter::kAllEntries)
-        || ((dirFilters & DEnumerator::DirFilter::kDirs) && (dirFilters & DEnumerator::DirFilter::kFiles))) {
-        // 判断读写执行
-        if (!checkRWE())
-            ret = false;
-    } else if ((dirFilters & DEnumerator::DirFilter::kDirs).testFlag(DEnumerator::DirFilter::kDirs)) {
-        if (!isDir) {
-            ret = false;
-        } else {
-            // 判断读写执行
-            if (!checkRWE())
-                ret = false;
-        }
-    } else if ((dirFilters & DEnumerator::DirFilter::kFiles).testFlag(DEnumerator::DirFilter::kFiles)) {
-        const bool isFile = dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsFile).toBool();
-        if (!isFile) {
-            ret = false;
-        } else {
-            // 判断读写执行
-            if (!checkRWE())
-                ret = false;
-        }
+    return !dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsSymlink).toBool();
+}
+
+bool DEnumeratorPrivate::checkHiddenFilter()
+{
+    if (dirFilters.testFlag(DEnumerator::DirFilter::kHidden))
+        return true;
+
+    const QString &parentPath = dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardParentPath).toString();
+    const QUrl &urlHidden = QUrl::fromLocalFile(parentPath + "/.hidden");
+
+    QSet<QString> hideList;
+    if (hideListMap.count(urlHidden) > 0) {
+        hideList = hideListMap.value(urlHidden);
+    } else {
+        hideList = DLocalHelper::hideListFromUrl(urlHidden);
+        hideListMap.insert(urlHidden, hideList);
     }
 
-    if ((dirFilters & DEnumerator::DirFilter::kNoSymLinks).testFlag(DEnumerator::DirFilter::kNoSymLinks)) {
-        const bool isSymlinks = dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsSymlink).toBool();
-        if (isSymlinks)
-            ret = false;
-    }
+    return !DLocalHelper::fileIsHidden(dfileInfoNext.data(), hideList, false);
+}
 
-    const QString &fileInfoName = dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardName).toString();
-    const bool showHidden = (dirFilters & DEnumerator::DirFilter::kHidden).testFlag(DEnumerator::DirFilter::kHidden);
-    if (!showHidden) {   // hide files
-        const QString &parentPath = dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardParentPath).toString();
-        const QUrl &urlHidden = QUrl::fromLocalFile(parentPath + "/.hidden");
+bool DEnumeratorPrivate::checkNameFilter(const QString &fileName)
+{
+    if (nameFilters.isEmpty())
+        return true;
 
-        QSet<QString> hideList;
-        if (hideListMap.count(urlHidden) > 0) {
-            hideList = hideListMap.value(urlHidden);
-        } else {
-            hideList = DLocalHelper::hideListFromUrl(urlHidden);
-            hideListMap.insert(urlHidden, hideList);
-        }
-        bool isHidden = DLocalHelper::fileIsHidden(dfileInfoNext.data(), hideList, false);
-        if (isHidden)
-            ret = false;
-    }
-
-    // filter name
-    const bool caseSensitive = (dirFilters & DEnumerator::DirFilter::kCaseSensitive).testFlag(DEnumerator::DirFilter::kCaseSensitive);
-    if (nameFilters.contains(fileInfoName, caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive))
-        ret = false;
-
-    const bool showDot = !((dirFilters & DEnumerator::DirFilter::kNoDotAndDotDot).testFlag(DEnumerator::DirFilter::kNoDotAndDotDot))
-            && !((dirFilters & DEnumerator::DirFilter::kNoDot).testFlag(DEnumerator::DirFilter::kNoDot));
-    const bool showDotDot = !((dirFilters & DEnumerator::DirFilter::kNoDotAndDotDot).testFlag(DEnumerator::DirFilter::kNoDotAndDotDot))
-            && !((dirFilters & DEnumerator::DirFilter::kNoDotDot).testFlag(DEnumerator::DirFilter::kNoDotDot));
-    if (!showDot && fileInfoName == ".")
-        ret = false;
-    if (!showDotDot && fileInfoName == "..")
-        ret = false;
-
-    return ret;
+    const bool caseSensitive = dirFilters.testFlag(DEnumerator::DirFilter::kCaseSensitive);
+    return !nameFilters.contains(fileName, caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
 }
 
 bool DEnumeratorPrivate::openDirByfts()
@@ -266,29 +323,22 @@ bool DEnumeratorPrivate::openDirByfts()
 
 void DEnumeratorPrivate::insertSortFileInfoList(QList<QSharedPointer<DEnumerator::SortFileInfo>> &fileList, QList<QSharedPointer<DEnumerator::SortFileInfo>> &dirList, FTSENT *ent, FTS *fts, const QSet<QString> &hideList)
 {
-    QSharedPointer<DFileInfo> info(nullptr);
-    bool isDir = S_ISDIR(ent->fts_statp->st_mode);
-    if (S_ISLNK(ent->fts_statp->st_mode)) {
-        const QUrl &url = QUrl::fromLocalFile(ent->fts_path);
-        info = DLocalHelper::createFileInfoByUri(url);
-        isDir = info->attribute(DFileInfo::AttributeID::kStandardIsDir).toBool();
-    }
-
-    if (isDir)
+    auto sortInfo = DLocalHelper::createSortFileInfo(ent, hideList);
+    if (sortInfo->isDir && !sortInfo->isSymLink)
         fts_set(fts, ent, FTS_SKIP);
 
-    if (isDir && !isMixDirAndFile) {
+    if (sortInfo->isDir && !isMixDirAndFile) {
         if (sortOrder == Qt::DescendingOrder)
-            dirList.push_front(DLocalHelper::createSortFileInfo(ent, info, hideList));
+            dirList.push_front(sortInfo);
         else
-            dirList.push_back(DLocalHelper::createSortFileInfo(ent, info, hideList));
+            dirList.push_back(sortInfo);
         return;
     }
 
     if (sortOrder == Qt::DescendingOrder)
-        fileList.push_front(DLocalHelper::createSortFileInfo(ent, info, hideList));
+        fileList.push_front(sortInfo);
     else
-        fileList.push_back(DLocalHelper::createSortFileInfo(ent, info, hideList));
+        fileList.push_back(sortInfo);
 }
 
 void DEnumeratorPrivate::enumUriAsyncOvered(GList *files)
@@ -316,7 +366,7 @@ void DEnumeratorPrivate::startAsyncIterator()
     EnumUriData *userData = new EnumUriData();
     userData->pointer = sharedFromThis();
     g_file_enumerate_children_async(gfile,
-                                    FILE_DEFAULT_ATTRIBUTES,
+                                    queryAttributes.toStdString().c_str(),
                                     G_FILE_QUERY_INFO_NONE,
                                     G_PRIORITY_DEFAULT,
                                     cancellable,
@@ -329,27 +379,25 @@ bool DEnumeratorPrivate::hasNext()
     if (!asyncOvered)
         return false;
 
-    if (asyncInfos.isEmpty())
-        return false;
+    while (!asyncInfos.isEmpty()) {
+        auto gfileInfo = asyncInfos.takeFirst();
 
-    auto gfileInfo = asyncInfos.takeFirst();
+        if (!gfileInfo)
+            continue;
 
-    if (!gfileInfo)
-        return hasNext();
-    auto path = uri.path()  == "/" ?
-                "/" + QString(g_file_info_get_name(gfileInfo)) :
-                uri.path() + "/" + QString(g_file_info_get_name(gfileInfo));
-    nextUrl = QUrl::fromLocalFile(path);
+        auto path = uri.path() == "/" ? "/" + QString(g_file_info_get_name(gfileInfo)) : uri.path() + "/" + QString(g_file_info_get_name(gfileInfo));
+        nextUrl = QUrl::fromLocalFile(path);
 
-    dfileInfoNext = DLocalHelper::createFileInfoByUri(nextUrl, g_file_info_dup(gfileInfo), FILE_DEFAULT_ATTRIBUTES,
-                                                      enumLinks ? DFileInfo::FileQueryInfoFlags::kTypeNone : DFileInfo::FileQueryInfoFlags::kTypeNoFollowSymlinks);
+        dfileInfoNext = DLocalHelper::createFileInfoByUri(nextUrl, g_file_info_dup(gfileInfo), queryAttributes.toStdString().c_str(),
+                                                          enumLinks ? DFileInfo::FileQueryInfoFlags::kTypeNone : DFileInfo::FileQueryInfoFlags::kTypeNoFollowSymlinks);
 
-    g_object_unref(gfileInfo);
+        g_object_unref(gfileInfo);
 
-    if (!checkFilter())
-        return hasNext();
+        if (checkFilter())
+            return true;
+    }
 
-    return true;
+    return false;
 }
 
 QList<QSharedPointer<DFileInfo>> DEnumeratorPrivate::fileInfoList()
@@ -361,13 +409,18 @@ QList<QSharedPointer<DFileInfo>> DEnumeratorPrivate::fileInfoList()
             continue;
         auto url = QUrl::fromLocalFile(uri.path() + "/" + QString(g_file_info_get_name(gfileInfo)));
 
-        infoList.append(DLocalHelper::createFileInfoByUri(url, g_file_info_dup(gfileInfo), FILE_DEFAULT_ATTRIBUTES,
+        infoList.append(DLocalHelper::createFileInfoByUri(url, g_file_info_dup(gfileInfo), queryAttributes.toStdString().c_str(),
                                                           enumLinks ? DFileInfo::FileQueryInfoFlags::kTypeNone
                                                                     : DFileInfo::FileQueryInfoFlags::kTypeNoFollowSymlinks));
         g_object_unref(gfileInfo);
     }
 
     return infoList;
+}
+
+void DEnumeratorPrivate::setQueryAttributes(const QString &attributes)
+{
+    queryAttributes = attributes;
 }
 
 void DEnumeratorPrivate::enumUriAsyncCallBack(GObject *sourceObject, GAsyncResult *res, gpointer userData)
@@ -444,7 +497,6 @@ void DEnumeratorPrivate::moreFilesCallback(GObject *sourceObject, GAsyncResult *
 
     if (error)
         g_error_free(error);
-
 }
 
 /************************************************
@@ -548,6 +600,16 @@ bool DEnumerator::isSortMixed() const
     return d->isMixDirAndFile;
 }
 
+void DEnumerator::setQueryAttributes(const QString &attributes)
+{
+    return d->setQueryAttributes(attributes);
+}
+
+QString DEnumerator::queryAttributes() const
+{
+    return d->queryAttributes;
+}
+
 bool DEnumerator::cancel()
 {
     if (d->cancellable && !g_cancellable_is_cancelled(d->cancellable))
@@ -565,55 +627,59 @@ bool DEnumerator::hasNext() const
     if (!d->inited)
         d->init();
 
-    if (d->stackEnumerator.isEmpty())
-        return false;
+    while (!d->stackEnumerator.isEmpty()) {
+        GFileEnumerator *enumerator = d->stackEnumerator.top();
+        GFileInfo *gfileInfo = nullptr;
+        GFile *gfile = nullptr;
 
-    // sub dir enumerator
-    if (d->enumSubDir && d->dfileInfoNext && d->dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsDir).toBool()) {
-        bool showDir = true;
-        if (d->dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsSymlink).toBool()) {
-            // is symlink, need enumSymlink
-            showDir = d->enumLinks;
+        g_autoptr(GError) gerror = nullptr;
+        d->checkAndResetCancel();
+        bool hasNext = g_file_enumerator_iterate(enumerator, &gfileInfo, &gfile, d->cancellable, &gerror);
+
+        if (hasNext) {
+            if (!gfileInfo || !gfile) {
+                // 当前枚举器已完成，弹出并继续下一个
+                GFileEnumerator *enumeratorPop = d->stackEnumerator.pop();
+                g_object_unref(enumeratorPop);
+                continue;
+            }
+
+            g_autofree gchar *path = g_file_get_path(gfile);
+            if (path) {
+                d->nextUrl = QUrl::fromLocalFile(QString::fromLocal8Bit(path));
+            } else {
+                g_autofree gchar *uri = g_file_get_uri(gfile);
+                d->nextUrl = QUrl(QString::fromLocal8Bit(uri));
+            }
+            d->dfileInfoNext = DLocalHelper::createFileInfoByUri(d->nextUrl, g_file_info_dup(gfileInfo), FILE_DEFAULT_ATTRIBUTES,
+                                                                 d->enumLinks ? DFileInfo::FileQueryInfoFlags::kTypeNone : DFileInfo::FileQueryInfoFlags::kTypeNoFollowSymlinks);
+
+            // 如果是目录且需要遍历子目录
+            if (d->enumSubDir && d->dfileInfoNext && d->dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsDir).toBool()) {
+                bool showDir = true;
+                if (d->dfileInfoNext->attribute(DFileInfo::AttributeID::kStandardIsSymlink).toBool()) {
+                    showDir = d->enumLinks;
+                }
+                if (showDir) {
+                    d->init(d->nextUrl);
+                }
+            }
+
+            if (!d->checkFilter())
+                continue;
+
+            return true;
         }
-        if (showDir)
-            d->init(d->nextUrl);
+
+        if (gerror) {
+            d->setErrorFromGError(gerror);
+            return false;
+        }
+
+        // 当前枚举器已完成，弹出并继续下一个
+        GFileEnumerator *enumeratorPop = d->stackEnumerator.pop();
+        g_object_unref(enumeratorPop);
     }
-    if (d->stackEnumerator.isEmpty())
-        return false;
-
-    GFileEnumerator *enumerator = d->stackEnumerator.top();
-
-    GFileInfo *gfileInfo = nullptr;
-    GFile *gfile = nullptr;
-
-    g_autoptr(GError) gerror = nullptr;
-    d->checkAndResetCancel();
-    bool hasNext = g_file_enumerator_iterate(enumerator, &gfileInfo, &gfile, d->cancellable, &gerror);
-    if (hasNext) {
-        if (!gfileInfo || !gfile) {
-            GFileEnumerator *enumeratorPop = d->stackEnumerator.pop();
-            g_object_unref(enumeratorPop);
-            return this->hasNext();
-        }
-
-        g_autofree gchar *path = g_file_get_path(gfile);
-        if (path) {
-            d->nextUrl = QUrl::fromLocalFile(QString::fromLocal8Bit(path));
-        } else {
-            g_autofree gchar *uri = g_file_get_uri(gfile);
-            d->nextUrl = QUrl(QString::fromLocal8Bit(uri));
-        }
-        d->dfileInfoNext = DLocalHelper::createFileInfoByUri(d->nextUrl, g_file_info_dup(gfileInfo), FILE_DEFAULT_ATTRIBUTES,
-                                                             d->enumLinks ? DFileInfo::FileQueryInfoFlags::kTypeNone : DFileInfo::FileQueryInfoFlags::kTypeNoFollowSymlinks);
-
-        if (!d->checkFilter())
-            return this->hasNext();
-
-        return true;
-    }
-
-    if (gerror)
-        d->setErrorFromGError(gerror);
 
     return false;
 }

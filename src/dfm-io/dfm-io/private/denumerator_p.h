@@ -54,6 +54,7 @@ public:
     void startAsyncIterator();
     bool hasNext();
     QList<QSharedPointer<DFileInfo>> fileInfoList();
+    void setQueryAttributes(const QString &attributes);
 
     static void enumUriAsyncCallBack(GObject *sourceObject,
                                      GAsyncResult *res,
@@ -78,6 +79,7 @@ public:
     QMap<QUrl, QSet<QString>> hideListMap;
     QList<QSharedPointer<DFileInfo>> infoList;
     QList<GFileInfo *> asyncInfos;
+    QString queryAttributes;
 
     QStringList nameFilters;
     DEnumerator::DirFilters dirFilters { DEnumerator::DirFilter::kNoFilter };
@@ -97,6 +99,14 @@ public:
     std::atomic_bool async { false };
     std::atomic_bool asyncStoped { false };
     std::atomic_bool asyncOvered { false };
+
+private:
+    bool shouldShowDotAndDotDot(const QString &fileName);
+    bool checkEntryTypeFilter();
+    bool checkPermissionFilter();
+    bool checkSymlinkFilter();
+    bool checkHiddenFilter();
+    bool checkNameFilter(const QString &fileName);
 };
 
 END_IO_NAMESPACE

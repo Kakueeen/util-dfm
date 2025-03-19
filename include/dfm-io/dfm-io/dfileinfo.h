@@ -76,6 +76,7 @@ public:
         kStandardTargetUri = 17,   // string
         kStandardSortOrder = 18,   // int32
         kStandardDescription = 19,   // string
+        kOriginalUri = 20,
 
         kEtagValue = 40,   // string
 
@@ -237,7 +238,7 @@ public:
     bool queryAttributeFinished() const;
 
 private:
-    QSharedDataPointer<DFileInfoPrivate> d;
+    mutable QSharedDataPointer<DFileInfoPrivate> d;
 };
 
 END_IO_NAMESPACE

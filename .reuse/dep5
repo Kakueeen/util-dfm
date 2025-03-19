@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name:util-dfm 
 Upstream-Contact: UnionTech Software Technology Co., Ltd. <>
-Source: https://gerrit.uniontech.com/admin/repos/util-dfm
+Source: https://github.com/linuxdeepin/util-dfm
 
 # ignore files
 Files: .gitignore
@@ -24,7 +24,7 @@ Copyright: None
 License: CC0-1.0
 
 # Project files
-Files: *CMakeLists.txt *.pc.in *.pri
+Files: *CMakeLists.txt *.pc.in *.pri *.cmake
 Copyright: None
 License: CC0-1.0
 
@@ -47,3 +47,10 @@ License: MIT
 Files: tests/3rdparty/utils/stub-ext/*
 Copyright: 2020 Zhang Yu
 License: MIT
+
+# udfclient
+Files: src/dfm-burn/3rdparty/udfclient/*
+Copyright: Reinoud Zandijk <reinoud@netbsd.org>
+License: ClArtistic
+
+

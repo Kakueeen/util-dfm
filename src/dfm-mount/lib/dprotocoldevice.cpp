@@ -25,9 +25,9 @@ struct CallbackProxyWithData
 {
     CallbackProxyWithData() = delete;
     explicit CallbackProxyWithData(DeviceOperateCallback cb)
-        : caller(cb) { }
+        : caller(cb) {}
     explicit CallbackProxyWithData(DeviceOperateCallbackWithMessage cb)
-        : caller(cb) { }
+        : caller(cb) {}
     CallbackProxy caller;
     QPointer<DProtocolDevice> data;
     DProtocolDevicePrivate *d { nullptr };
@@ -128,7 +128,11 @@ QStringList DProtocolDevice::deviceIcons() const
             // iconName: . GThemedIcon drive-removable-media drive-removable drive drive-removable-media-symbolic drive-removable-symbolic drive-symbolic
             QString iconNames(cname);
             iconNames.remove(". GThemedIcon");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+            auto iconLst = iconNames.split(" ", Qt::SkipEmptyParts);
+#else
             auto iconLst = iconNames.split(" ", QString::SkipEmptyParts);
+#endif
             dp->deviceIcons = iconLst;
             return iconLst;
         }
@@ -145,6 +149,11 @@ QStringList DProtocolDevice::deviceIcons() const
 void DProtocolDevice::mountNetworkDevice(const QString &address, GetMountPassInfo getPassInfo, GetUserChoice getUserChoice, DeviceOperateCallbackWithMessage mountResult, int secs)
 {
     DNetworkMounter::mountNetworkDev(address, getPassInfo, getUserChoice, mountResult, secs);
+}
+
+bool DProtocolDevice::isMountByDaemon(const QString &address)
+{
+    return DNetworkMounter::isMountByDae(address);
 }
 
 void DProtocolDevice::setOperatorTimeout(int msecs)
@@ -288,7 +297,7 @@ bool DProtocolDevicePrivate::unmount(const QVariantMap &opts)
         return true;
     } else {
         QString mpt = mountPoint(mountHandler);
-        if (mpt.contains(QRegularExpression("^/media/.*/smbmounts/")) && DNetworkMounter::isDaemonMountEnable()) {
+        if (mpt.contains(QRegularExpression("^(?:/run/media|/media)/.*")) && DNetworkMounter::isDaemonMountEnable()) {
             return DNetworkMounter::unmountNetworkDev(mpt);
         } else {
             GMountOperation *operation { nullptr };
@@ -326,7 +335,7 @@ void DProtocolDevicePrivate::unmountAsync(const QVariantMap &opts, DeviceOperate
         return;
     } else {
         QString mpt = mountPoint(mountHandler);
-        if (mpt.contains(QRegularExpression("^/media/.*/smbmounts/")) && DNetworkMounter::isDaemonMountEnable()) {
+        if (mpt.contains(QRegularExpression("^(?:/run/media|/media)/.*")) && DNetworkMounter::isDaemonMountEnable()) {
             DNetworkMounter::unmountNetworkDevAsync(mpt, cb);
         } else {
             GCancellable *cancellable { nullptr };

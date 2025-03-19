@@ -9,10 +9,20 @@ SET(CMAKE_AUTOMOC ON)
 SET(CMAKE_INCLUDE_CURRENT_DIR ON)
 #SET(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall")
-set(QT_MINIMUM_VERSION "5.6.3")
+
 
 include(GNUInstallDirs)
-find_package(Qt5 ${QT_MINIMUM_VERSION} CONFIG REQUIRED Core)
+
+find_package(Qt6 QUIET)
+if (Qt6_FOUND)
+    message(STATUS "Found Qt6: ${Qt6_VERSION}")
+    set(QT_VERSION_MAJOR 6)
+    set(DFM_VERSION_MAJOR 6)
+else()
+    message(WARNING "Qt6 not found!")
+endif()
+
+# default
 find_package(PkgConfig REQUIRED)
 
 # Install settings

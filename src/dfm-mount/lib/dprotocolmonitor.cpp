@@ -113,7 +113,7 @@ DeviceType DProtocolMonitorPrivate::monitorObjectType() const
 
 QStringList DProtocolMonitorPrivate::getDevices()
 {
-    return cachedDevices.toList();
+    return cachedDevices.values();
 }
 
 QSharedPointer<DDevice> DProtocolMonitorPrivate::createDevice(const QString &id)
@@ -341,7 +341,7 @@ bool DProtocolMonitorPrivate::isNativeMount(const QString &mpt)
 
 bool DProtocolMonitorPrivate::isMountByOther(const QString &mpt)
 {
-    QRegularExpression re("^/media/(.*)/smbmounts");
+    QRegularExpression re("^/(?:run/)?media/(.*)/smbmounts");
     auto match = re.match(mpt);
     if (!match.hasMatch())   // mount which not mouted at preseted path regards as a normal mount
         return false;

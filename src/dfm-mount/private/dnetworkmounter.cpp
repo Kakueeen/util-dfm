@@ -18,12 +18,12 @@
 
 DFM_MOUNT_USE_NS
 
-static constexpr char kDaemonService[] { "com.deepin.filemanager.daemon" };
-static constexpr char kDaemonPath[] { "/com/deepin/filemanager/daemon" };
+static constexpr char kDaemonService[] { "org.deepin.Filemanager.MountControl" };
+static constexpr char kDaemonPath[] { "/org/deepin/Filemanager" };
 static constexpr char kDaemonIntro[] { "org.freedesktop.DBus.Introspectable" };
 static constexpr char kDaemonIntroMethod[] { "Introspect" };
-static constexpr char kMountControlPath[] { "/com/deepin/filemanager/daemon/MountControl" };
-static constexpr char kMountControlIFace[] { "com.deepin.filemanager.daemon.MountControl" };
+static constexpr char kMountControlPath[] { "/org/deepin/Filemanager/MountControl" };
+static constexpr char kMountControlIFace[] { "org.deepin.Filemanager.MountControl" };
 static constexpr char kMountControlMount[] { "Mount" };
 static constexpr char kMountControlUnmount[] { "Unmount" };
 
@@ -37,6 +37,7 @@ static constexpr char kLoginDomain[] { "domain" };
 static constexpr char kLoginPasswd[] { "passwd" };
 static constexpr char kLoginTimeout[] { "timeout" };
 static constexpr char kMountFsType[] { "fsType" };
+static constexpr char kSmbConfigPath[] { "/etc/samba/smb.conf" };
 
 static constexpr char kDaemonMountRetKeyMpt[] { "mountPoint" };
 static constexpr char kDaemonMountRetKeyErrno[] { "errno" };
@@ -73,10 +74,28 @@ bool DNetworkMounter::isDaemonMountEnable()
     if (!systemBusIFace->isServiceRegistered(kDaemonService))
         return false;
 
-    QDBusInterface daemonIface(kDaemonService, kDaemonPath, kDaemonIntro,
-                               QDBusConnection::systemBus());
-    QDBusReply<QString> reply = daemonIface.call(kDaemonIntroMethod);
-    return reply.value().contains("<node name=\"MountControl\"/>");
+    // check if MountControl interface exists
+    QDBusInterface daemonIntroIface(kDaemonService, kDaemonPath, kDaemonIntro,
+                                    QDBusConnection::systemBus());
+    QDBusReply<QString> reply = daemonIntroIface.call(kDaemonIntroMethod);
+    if (reply.value().contains(R"(<node name="MountControl"/>)")) {
+        // check if "SupportedFileSystems" method exists
+        QDBusInterface introIface(kDaemonService,
+                                  kMountControlPath,
+                                  kDaemonIntro,
+                                  QDBusConnection::systemBus());
+        QDBusReply<QString> ifaceDesc = introIface.call(kDaemonIntroMethod);
+        if (!ifaceDesc.value().contains(R"(<method name="SupportedFileSystems">)"))
+            return true;
+
+        QDBusInterface mountIface(kDaemonService,
+                                  kMountControlPath,
+                                  kMountControlIFace,
+                                  QDBusConnection::systemBus());
+        QDBusReply<QStringList> supported = mountIface.call("SupportedFileSystems");
+        return supported.value().contains("cifs");
+    }
+    return false;
 }
 
 QList<QVariantMap> DNetworkMounter::loginPasswd(const QString &address)
@@ -103,7 +122,7 @@ QList<QVariantMap> DNetworkMounter::loginPasswd(const QString &address)
                     auto info = static_cast<QVariantMap *>(vm);
                     if (!info)
                         return;
-                    info->insert(static_cast<char *>(k), static_cast<char *>(v));
+                    info->insert(static_cast<char *>(k), QString(static_cast<char *>(v)));
                     qInfo() << "found saved login info:" << *info;
                 },
                 &attr);
@@ -129,8 +148,11 @@ QList<QVariantMap> DNetworkMounter::loginPasswd(const QString &address)
                 nullptr);
         if (err)
             qDebug() << "query password failed: " << passwd << err->message;
-        else
-            passwd.insert(kLoginPasswd, QString(pwd));
+        else {
+            // since daemon accept base64-ed passwd to mount cifs, cleartext should be encoded with base64
+            // see commit of dde-file-manager: 3b50664d4034754b15c1a516cfaab8c7fbdd3db9
+            passwd.insert(kLoginPasswd, QString(QByteArray(pwd).toBase64()));
+        }
     }
     return passwds;
 }
@@ -176,12 +198,17 @@ void DNetworkMounter::mountNetworkDev(const QString &address, GetMountPassInfo g
                                       GetUserChoice getUserChoice,
                                       DeviceOperateCallbackWithMessage mountResult, int secs)
 {
-    QUrl u(address);
-    // don't mount samba's root by Daemon
-    if (u.scheme() == "smb" && !u.path().remove("/").isEmpty() && isDaemonMountEnable())
+    if (isMountByDae(address))
         mountByDaemon(address, getPassInfo, mountResult, secs);
     else
         mountByGvfs(address, getPassInfo, getUserChoice, mountResult, secs);
+}
+
+bool DNetworkMounter::isMountByDae(const QString &address)
+{
+    QUrl u(address);
+    // don't mount samba's root by Daemon
+    return u.scheme() == "smb" && !u.path().remove("/").isEmpty() && isDaemonMountEnable();
 }
 
 bool DNetworkMounter::unmountNetworkDev(const QString &mpt)
@@ -214,9 +241,11 @@ void DNetworkMounter::mountByDaemon(const QString &address, GetMountPassInfo get
                                     DeviceOperateCallbackWithMessage mountResult, int secs)
 {
     auto requestLoginInfo = [address, getPassInfo] {
-        if (getPassInfo)
+        if (getPassInfo) {
+            QSettings setting(kSmbConfigPath, QSettings::IniFormat);
             return getPassInfo(QObject::tr("need authorization to access %1").arg(address),
-                               Utils::currentUser(), "WORKGROUP");
+                               Utils::currentUser(), setting.value("global/workgroup", "WORKGROUP").toString());
+        }
         return MountPassInfo();
     };
     auto checkThread = [] {
@@ -467,8 +496,13 @@ DNetworkMounter::MountRet DNetworkMounter::mountWithUserInput(const QString &add
     if (ok) {
         err = DeviceError::kNoError;
 
-        if (!info.anonymous && info.savePasswd != NetworkMountPasswdSaveMode::kNeverSavePasswd)
-            savePasswd(address, info);
+        if (!info.anonymous && info.savePasswd != NetworkMountPasswdSaveMode::kNeverSavePasswd) {
+            // since passwd from user input is base64-ed data, so the passwd should be decoded into cleartext for saving.
+            // associated commit of dde-file-manager: 3b50664d4034754b15c1a516cfaab8c7fbdd3db9
+            auto _info = info;
+            _info.passwd = QByteArray::fromBase64(info.passwd.toLocal8Bit());
+            savePasswd(address, _info);
+        }
     }
 
     return { ok, err, mpt };
@@ -542,7 +576,7 @@ bool DNetworkMounter::isMounted(const QString &address, QString &mpt)
     if (fs) {
         mpt = mnt_fs_get_target(fs);
         qDebug() << "find mounted at: " << mpt << address;
-        QRegularExpression reg("^/media/(.*)/smbmounts/");
+        QRegularExpression reg("^/(?:run/)?media/(.*)/smbmounts/");
         QRegularExpressionMatch match = reg.match(mpt);
 
         if (match.hasMatch()) {

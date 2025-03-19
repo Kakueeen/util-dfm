@@ -59,6 +59,7 @@ DFileInfoPrivate::DFileInfoPrivate(DFileInfo *qq)
     : q(qq)
 {
     attributesRealizationSelf.push_back(DFileInfo::AttributeID::kStandardIsHidden);
+    attributesRealizationSelf.push_back(DFileInfo::AttributeID::kOriginalUri);
     attributesRealizationSelf.push_back(DFileInfo::AttributeID::kTimeCreated);
     attributesRealizationSelf.push_back(DFileInfo::AttributeID::kTimeCreatedUsec);
     attributesRealizationSelf.push_back(DFileInfo::AttributeID::kTimeModified);
@@ -215,6 +216,14 @@ void DFileInfoPrivate::setErrorFromGError(GError *gerror)
 {
     if (!gerror)
         return;
+
+    if (g_error_matches(gerror, G_IO_ERROR,G_IO_ERROR_FAILED) &&
+            QString(gerror->message).contains(strerror(EHOSTDOWN))) {
+        error.setCode(DFMIOErrorCode::DFM_IO_ERROR_HOST_IS_DOWN);
+        error.setMessage(gerror->message);
+        return;
+    }
+
     error.setCode(DFMIOErrorCode(gerror->code));
     if (error.code() == DFMIOErrorCode::DFM_IO_ERROR_FAILED)
         error.setMessage(gerror->message);
@@ -391,6 +400,10 @@ QVariant DFileInfoPrivate::attributesBySelf(DFileInfo::AttributeID id)
         }
         return QVariant(ret);
     }
+    case DFileInfo::AttributeID::kOriginalUri:
+        if (gfile)
+            return QUrl(g_file_get_uri(gfile));
+        return uri;
     default:
         return retValue;
     }
@@ -465,6 +478,11 @@ QVariant DFileInfoPrivate::attributesFromUrl(DFileInfo::AttributeID id)
             return fullName;
         else
             return fullName.left(pos2);
+    }
+    case DFileInfo::AttributeID::kOriginalUri: {
+        if (gfile)
+            return QUrl(g_file_get_uri(gfile));
+        return uri;
     }
     default:
         break;
@@ -759,6 +777,7 @@ QVariant DFileInfo::attribute(DFileInfo::AttributeID id, bool *success) const
         if (d->gfileinfo) {
             DFMIOErrorCode errorCode(DFM_IO_ERROR_NONE);
             if (!d->attributesRealizationSelf.contains(id)) {
+                QMutexLocker lk(&d->mutex);
                 retValue = DLocalHelper::attributeFromGFileInfo(d->gfileinfo, id, errorCode);
                 if (errorCode != DFM_IO_ERROR_NONE)
                     const_cast<DFileInfoPrivate *>(d.data())->error.setCode(errorCode);
